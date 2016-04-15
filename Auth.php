@@ -10,135 +10,195 @@
  */
 
 /**
- * AUTH CLASS
+ * Auth class
  * 
- * Permet la gestion des sessions utilisateurs
+ * Allows basic user authentication
+ * WARNING: 
+ * _ This plugin requires Session plugin (bundled with Atomik) to be started before.
+ * _ User password must be encrypted with MD5 method
  */
 class Auth
 {
-	/**
-	 * Tableau de configuration du plugin
-	 */
-    public static $config = array();
 
 	/**
-	 * Variable de stockage de la connexion à la base de données
+	 * Plugin config array
 	 */
-    private static $db;
+	public static $config = array();
 
 
-    /**
-     * Starts this class as a plugin
-     *
-     * @param array $config
-     */
-    public static function start( &$config )
-    {
-        $config = array_merge(array(
-
-			'salt'       =>	'r^mS3FS%7-9g', // clé de salage à modifier avant mise en production // attention ! modifier cette clé pendant la production invalidera tous les passwords utilisateurs
-			'encryption' => 'sha1', 		// ou 'md5'
-			'ttl'        => 60 * 60,		// en secondes (= 1 heure)
-
-        ), $config);
-
-        self::$config = &$config;
-
-    	self::$db = Atomik::get('db');
-        
-        Atomik::registerHelper('isLogged', 'Auth::isLogged');
-        Atomik::registerHelper('login', 'Auth::login');
-        Atomik::registerHelper('logout', 'Auth::logout');
-        Atomik::registerHelper('register', 'Auth::register');
-    }
+	/**
+	 * Database
+	 */
+	private static $db;
 
 
-    /**
-     * Défini si le visiteur est loggé
-     * @return true si connecté, false dans tous les autres cas
-     */
-    public static function isLogged()
+	/**
+	 * Starts this class as a plugin
+	 *
+	 * @param array $config
+	 */
+	public static function start( &$config )
 	{
-		if ($user = Atomik::get('auth.user') == null) {
-			return false;
-		}
+		// Default configuration
+		$config = array_merge(array(
 
-		if ( !isset( $user['user_token'] ) || !isset( $user['user_id'] ) ) {
-			return false;
-		}
+			// Salt key
+			'auth_salt'       => ';HX +Cd>Ii9E|&A{4w[>YGt;,IXt@)FcnbxU.+-sv0m~y>k%rH!fNao}Y,--Ue$A',
+			
+			// Encryption method ('md5' or 'sha1')
+			'encryption' => 'sha1',
 
-		$result = self::$db->selectOne( 'users', array( 'user_token' => $user['user_token'], 'user_id' => $user['user_id'] ) );
+			// Time to live en secondes
+			'ttl'        => 60 * 60,
 
-		if ( empty( $result )) {
-			return false;
-		}
+			// Users table name
+			'users_table_name' => 'users',
+
+			// Users table description (required fields)
+			'users_table_description' => array(
+				'id'              => 'user_email',
+				'password'        => 'user_password',
+				'username'        => 'user_prenom',
+				'token'           => 'user_token',
+				'last_action_time' => 'user_updated_at',
+				),
+
+			), $config);
+
+		self::$config = &$config;
+
+		self::$db = Atomik::get('db');
 		
-		return true;
-	}
+		Atomik::registerHelper('isLogged', 'Auth::isLogged');
+		Atomik::registerHelper('login', 'Auth::login');
+		Atomik::registerHelper('logout', 'Auth::logout');
+	 }
 
 
 	/**
-	 * Tente une procédure de login avec un couple email/pwd
-	 * @return true si réussie, false dans tous les autres cas
+	 * Tries to authenticate a user with an id (usually his email) & password
+	 * @return true if success, false either
 	 */
-	public static function login( $email, $password ) 
+	public static function login( $id, $password ) 
 	{
-		if ( self::$config['encryption'] != 'md5' && self::$config['encryption'] != 'sha1') {
+		$allowed_encryption_methods = array( 'md5', 'sha1' );
+
+		if ( ! in_array( self::$config['encryption'], $allowed_encryption_methods ) ) {
 			throw new AtomikException("Invalid encryption mode", 1);
 		}
 		else {
-			$encryption_mode = self::$config['encryption'];
+			$encryption_method = self::$config['encryption'];
 		}
 
-		$hashed_pwd = $encryption_mode( self::$config['salt'] . $password );
-		$result = self::$db->selectOne( 'users', array( 'user_email' => $email, 'user_password' => $hashed_pwd ) );
-		
+		$hashed_pwd = $encryption_method( $password );
+
+		$query_params = array( 
+			self::$config['users_table_description']['id'] => $id, 
+			self::$config['users_table_description']['password'] => $hashed_pwd 
+			);
+
+		$result = self::$db->selectOne( self::$config['users_table_name'], $query_params );
+
 		if ( $result !== false )
 		{
 			$user = array(
-				'user_id' => $result['user_id'],
-				'user_token' => self::_generateToken(),
-				'user_prenom' => $result['user_prenom'],
-			);
-		
-			self::$db->update(
-				'users', 
-				array( 
-					'user_token' => $user['user_token'],
-					'user_updated_at' => date('Y-m-d H:i:s')
-				), 
-				array('user_id' => $user['user_id'])
-			);
-		
-			Atomik::set( 'auth.user', $user );
-		
+				'id' => $result[self::$config['users_table_description']['id']],
+				'token' => self::_generateToken(),
+				'username' => $result[self::$config['users_table_description']['username']],
+				);
+			
+			$query_values = array( 
+				self::$config['users_table_description']['token'] => $user['token'],
+				self::$config['users_table_description']['last_action_time'] => date('Y-m-d H:i:s')
+				);
+			$query_where = array(
+				self::$config['users_table_description']['id'] => $user['id']
+				);
+
+			self::$db->update( self::$config['users_table_name'], $query_values, $query_where );
+			
+			Atomik::set( 'session.auth', $user );
+			
 			return true;
 		}
 		return false;
 	}
 
 
+
 	/**
-	 * Déconnecte l'utilisateur actuel
+	 * Determines if a user is logged comparing session stored infos (token & id) with db infos
+	 * @return boolean true if connected, false either
+	 */
+	public static function isLogged()
+	{
+		if ( ! Atomik::has('session.auth') ) {
+			return false;
+		}
+
+		$user = Atomik::get('session.auth');
+
+		if ( !is_array($user) || !isset( $user['token'] ) || !isset( $user['id'] ) ) {
+			Atomik::delete('session.auth');
+			return false;
+		}
+		$query_params = array( 
+			self::$config['users_table_description']['token'] => $user['token'],
+			self::$config['users_table_description']['id'] => $user['id']
+			);
+
+		$result = self::$db->selectOne( self::$config['users_table_name'], $query_params );
+
+		if ( empty( $result ) ) {
+			Atomik::delete('session.auth');
+			return false;
+		}
+
+		$last_action_time = strtotime( $result[self::$config['users_table_description']['last_action_time']] );
+		$time = time();
+
+		if ( ( $time - $last_action_time ) > self::$config['ttl'] ) {
+			Atomik::delete('session.auth');
+			return false;
+		}
+		
+		$query_values = array( 
+			self::$config['users_table_description']['last_action_time'] => date('Y-m-d H:i:s')
+			);
+		$query_where = array(
+			self::$config['users_table_description']['id'] => $user['id']
+			);
+
+		self::$db->update( self::$config['users_table_name'], $query_values, $query_where );
+
+		return true;
+	}
+
+
+
+	/**
+	 * Disconnects the user if connected
+	  * @return boolean true if user was NOT connected, his session infos either
 	 */
 	public static function logout()
 	{
-		if ( Atomik::has('auth.user')) {
-			Atomik::delete('auth.user');
+		if ( Atomik::has('session.auth')) {
+			return Atomik::delete('session.auth');
 		}
+
+		return true;
 	}
+
 
 
 	/**
-	 * Génère un token unique
-	 * @return string le token
+	 * Generates a unique token
+	 * @return string the token
 	 */
 	protected static function _generateToken() 
 	{
-		return md5( self::$config['salt'] . time() );
+		return md5( self::$config['auth_salt'] . time() );
 	}
-
-
 
 
 }
